@@ -127,6 +127,12 @@ function formatMs(ms: number | null) {
 
 type OcrAttempt = { text: string; confidence: number };
 
+const DATABASE_PAGE_SIZE = {
+  chunks: 20,
+  terms: 50,
+  postings: 50,
+} as const;
+
 function usefulCharacterCount(text: string) {
   return (text.match(/[가-힣ㄱ-ㅎㅏ-ㅣA-Za-z0-9]/g) ?? []).length;
 }
@@ -214,8 +220,8 @@ function enhanceKoreanDocument(source: HTMLCanvasElement) {
 
 function readDatabaseSnapshot(db: Database): DatabaseSnapshot {
   const count = db.exec("SELECT COUNT(*) FROM postings");
-  const termRows = db.exec("SELECT term, df FROM terms ORDER BY df DESC, term LIMIT 5000");
-  const postingRows = db.exec("SELECT term, chunk_id, tf FROM postings ORDER BY term, chunk_id LIMIT 20000");
+  const termRows = db.exec("SELECT term, df FROM terms ORDER BY df DESC, term");
+  const postingRows = db.exec("SELECT term, chunk_id, tf FROM postings ORDER BY term, chunk_id");
   return {
     byteLength: db.export().byteLength,
     postingCount: Number(count[0]?.values[0]?.[0] ?? 0),
@@ -247,6 +253,9 @@ export default function Home() {
   const [ocrEngine, setOcrEngine] = useState<OcrEngine>("paddle");
   const [databaseSnapshot, setDatabaseSnapshot] = useState<DatabaseSnapshot>(emptyDatabaseSnapshot);
   const [databaseFilter, setDatabaseFilter] = useState("");
+  const [chunkPage, setChunkPage] = useState(1);
+  const [termPage, setTermPage] = useState(1);
+  const [postingPage, setPostingPage] = useState(1);
   const dbRef = useRef<Database | null>(null);
 
   const totalMs = useMemo(
@@ -270,6 +279,9 @@ export default function Home() {
     setHasSearched(false);
     setDatabaseSnapshot(emptyDatabaseSnapshot);
     setDatabaseFilter("");
+    setChunkPage(1);
+    setTermPage(1);
+    setPostingPage(1);
     setPhases(initialPhases());
     setProgress(2);
 
@@ -558,6 +570,9 @@ export default function Home() {
     setTermCount(0);
     setDatabaseSnapshot(emptyDatabaseSnapshot);
     setDatabaseFilter("");
+    setChunkPage(1);
+    setTermPage(1);
+    setPostingPage(1);
     setProgress(0);
     setError("");
     setPhases(initialPhases());
@@ -565,24 +580,38 @@ export default function Home() {
 
   const searchableQueryTokens = searchTerms(queryTokens);
   const normalizedDatabaseFilter = databaseFilter.trim().toLocaleLowerCase("ko-KR");
-  const visibleChunks = chunks
-    .filter((chunk) =>
+  const filteredChunks = chunks.filter((chunk) =>
       !normalizedDatabaseFilter
       || String(chunk.id) === normalizedDatabaseFilter
       || String(chunk.page) === normalizedDatabaseFilter
       || chunk.text.toLocaleLowerCase("ko-KR").includes(normalizedDatabaseFilter),
-    )
-    .slice(0, 50);
-  const visibleTerms = databaseSnapshot.terms
-    .filter((row) => !normalizedDatabaseFilter || row.term.includes(normalizedDatabaseFilter))
-    .slice(0, 100);
-  const visiblePostings = databaseSnapshot.postings
-    .filter((row) =>
+    );
+  const filteredTerms = databaseSnapshot.terms.filter(
+    (row) => !normalizedDatabaseFilter || row.term.includes(normalizedDatabaseFilter),
+  );
+  const filteredPostings = databaseSnapshot.postings.filter((row) =>
       !normalizedDatabaseFilter
       || row.term.includes(normalizedDatabaseFilter)
       || String(row.chunkId) === normalizedDatabaseFilter,
-    )
-    .slice(0, 150);
+    );
+  const chunkPageCount = Math.max(1, Math.ceil(filteredChunks.length / DATABASE_PAGE_SIZE.chunks));
+  const termPageCount = Math.max(1, Math.ceil(filteredTerms.length / DATABASE_PAGE_SIZE.terms));
+  const postingPageCount = Math.max(1, Math.ceil(filteredPostings.length / DATABASE_PAGE_SIZE.postings));
+  const currentChunkPage = Math.min(chunkPage, chunkPageCount);
+  const currentTermPage = Math.min(termPage, termPageCount);
+  const currentPostingPage = Math.min(postingPage, postingPageCount);
+  const visibleChunks = filteredChunks.slice(
+    (currentChunkPage - 1) * DATABASE_PAGE_SIZE.chunks,
+    currentChunkPage * DATABASE_PAGE_SIZE.chunks,
+  );
+  const visibleTerms = filteredTerms.slice(
+    (currentTermPage - 1) * DATABASE_PAGE_SIZE.terms,
+    currentTermPage * DATABASE_PAGE_SIZE.terms,
+  );
+  const visiblePostings = filteredPostings.slice(
+    (currentPostingPage - 1) * DATABASE_PAGE_SIZE.postings,
+    currentPostingPage * DATABASE_PAGE_SIZE.postings,
+  );
 
   return (
     <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -933,7 +962,12 @@ export default function Home() {
                 </TabsList>
                 <Input
                   value={databaseFilter}
-                  onChange={(event) => setDatabaseFilter(event.target.value)}
+                  onChange={(event) => {
+                    setDatabaseFilter(event.target.value);
+                    setChunkPage(1);
+                    setTermPage(1);
+                    setPostingPage(1);
+                  }}
                   placeholder="형태소, 청크 번호, 원문 찾기"
                   aria-label="SQLite 데이터 필터"
                   className="h-9 w-full sm:w-72"
@@ -960,6 +994,13 @@ export default function Home() {
                     </TableBody>
                   </Table>
                 </div>
+                <TablePagination
+                  page={currentChunkPage}
+                  pageCount={chunkPageCount}
+                  total={filteredChunks.length}
+                  pageSize={DATABASE_PAGE_SIZE.chunks}
+                  onPageChange={setChunkPage}
+                />
               </TabsContent>
 
               <TabsContent value="terms" className="mt-4">
@@ -978,6 +1019,13 @@ export default function Home() {
                     </TableBody>
                   </Table>
                 </div>
+                <TablePagination
+                  page={currentTermPage}
+                  pageCount={termPageCount}
+                  total={filteredTerms.length}
+                  pageSize={DATABASE_PAGE_SIZE.terms}
+                  onPageChange={setTermPage}
+                />
               </TabsContent>
 
               <TabsContent value="postings" className="mt-4">
@@ -997,12 +1045,61 @@ export default function Home() {
                     </TableBody>
                   </Table>
                 </div>
+                <TablePagination
+                  page={currentPostingPage}
+                  pageCount={postingPageCount}
+                  total={filteredPostings.length}
+                  pageSize={DATABASE_PAGE_SIZE.postings}
+                  onPageChange={setPostingPage}
+                />
               </TabsContent>
             </Tabs>
           )}
         </section>
       </div>
     </main>
+  );
+}
+
+function TablePagination({
+  page,
+  pageCount,
+  total,
+  pageSize,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+}) {
+  const firstItem = total ? (page - 1) * pageSize + 1 : 0;
+  const lastItem = Math.min(page * pageSize, total);
+
+  return (
+    <nav className="mt-3 flex flex-wrap items-center justify-between gap-3" aria-label="테이블 페이지 탐색">
+      <span className="text-xs tabular-nums text-[var(--muted-text)]">
+        {firstItem.toLocaleString()}–{lastItem.toLocaleString()} / {total.toLocaleString()}행
+      </span>
+      <div className="flex items-center gap-1">
+        <Button variant="outline" size="sm" disabled={page === 1} onClick={() => onPageChange(1)}>
+          처음
+        </Button>
+        <Button variant="outline" size="sm" disabled={page === 1} onClick={() => onPageChange(page - 1)}>
+          이전
+        </Button>
+        <span className="min-w-24 px-2 text-center text-xs font-semibold tabular-nums">
+          {page.toLocaleString()} / {pageCount.toLocaleString()}
+        </span>
+        <Button variant="outline" size="sm" disabled={page === pageCount} onClick={() => onPageChange(page + 1)}>
+          다음
+        </Button>
+        <Button variant="outline" size="sm" disabled={page === pageCount} onClick={() => onPageChange(pageCount)}>
+          마지막
+        </Button>
+      </div>
+    </nav>
   );
 }
 
