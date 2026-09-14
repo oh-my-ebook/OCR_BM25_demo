@@ -30,6 +30,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import ortJsepModuleUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
 import ortJsepWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
 import KiwiWorker from "./kiwi.worker?worker";
+import OcrComparison from "./ocr-comparison";
 import {
   chunkText,
   highlight,
@@ -55,7 +56,6 @@ type PageInfo = {
   source: "text" | "ocr";
   text: string;
   confidence?: number;
-  retried?: boolean;
   ocrEngine?: OcrEngine;
   ocrMs?: number;
   tokens: Token[];
@@ -133,19 +133,6 @@ const DATABASE_PAGE_SIZE = {
   postings: 50,
 } as const;
 
-function usefulCharacterCount(text: string) {
-  return (text.match(/[가-힣ㄱ-ㅎㅏ-ㅣA-Za-z0-9]/g) ?? []).length;
-}
-
-function shouldRetryOcr(result: OcrAttempt) {
-  return result.confidence < 62 || usefulCharacterCount(result.text) < 100;
-}
-
-function chooseBetterOcr(first: OcrAttempt, retry: OcrAttempt) {
-  const score = (result: OcrAttempt) => usefulCharacterCount(result.text) + result.confidence * 4;
-  return score(retry) > score(first) ? retry : first;
-}
-
 function paddleResultToAttempt(
   result: Awaited<ReturnType<Awaited<ReturnType<(typeof import("@paddleocr/paddleocr-js"))["PaddleOCR"]["create"]>>["predict"]>>[number],
 ) {
@@ -164,58 +151,6 @@ function paddleResultToAttempt(
       ? (items.reduce((sum, item) => sum + item.score, 0) / items.length) * 100
       : 0,
   };
-}
-
-function enhanceKoreanDocument(source: HTMLCanvasElement) {
-  const sourceContext = source.getContext("2d", { willReadFrequently: true });
-  if (!sourceContext) return source;
-  const { width, height } = source;
-  const sourcePixels = sourceContext.getImageData(0, 0, width, height).data;
-  const stride = Math.max(3, Math.floor(Math.min(width, height) / 700));
-  let left = width;
-  let top = height;
-  let right = 0;
-  let bottom = 0;
-
-  for (let y = 0; y < height; y += stride) {
-    for (let x = 0; x < width; x += stride) {
-      const offset = (y * width + x) * 4;
-      const gray = sourcePixels[offset] * 0.299 + sourcePixels[offset + 1] * 0.587 + sourcePixels[offset + 2] * 0.114;
-      if (gray < 225) {
-        left = Math.min(left, x);
-        top = Math.min(top, y);
-        right = Math.max(right, x);
-        bottom = Math.max(bottom, y);
-      }
-    }
-  }
-
-  const hasContent = right > left && bottom > top;
-  const padding = Math.max(24, Math.round(Math.min(width, height) * 0.015));
-  const cropLeft = hasContent ? Math.max(0, left - padding) : 0;
-  const cropTop = hasContent ? Math.max(0, top - padding) : 0;
-  const cropRight = hasContent ? Math.min(width, right + padding) : width;
-  const cropBottom = hasContent ? Math.min(height, bottom + padding) : height;
-  const output = document.createElement("canvas");
-  output.width = Math.max(1, cropRight - cropLeft);
-  output.height = Math.max(1, cropBottom - cropTop);
-  const context = output.getContext("2d", { alpha: false, willReadFrequently: true });
-  if (!context) return source;
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, output.width, output.height);
-  context.drawImage(source, cropLeft, cropTop, output.width, output.height, 0, 0, output.width, output.height);
-
-  const image = context.getImageData(0, 0, output.width, output.height);
-  for (let index = 0; index < image.data.length; index += 4) {
-    const gray = image.data[index] * 0.299 + image.data[index + 1] * 0.587 + image.data[index + 2] * 0.114;
-    const contrasted = gray > 225 ? 255 : Math.max(0, Math.min(255, (gray - 128) * 1.32 + 128));
-    image.data[index] = contrasted;
-    image.data[index + 1] = contrasted;
-    image.data[index + 2] = contrasted;
-    image.data[index + 3] = 255;
-  }
-  context.putImageData(image, 0, 0);
-  return output;
 }
 
 function readDatabaseSnapshot(db: Database): DatabaseSnapshot {
@@ -305,11 +240,10 @@ export default function Home() {
         source: "text" | "ocr";
         text: string;
         confidence?: number;
-        retried?: boolean;
         ocrEngine?: OcrEngine;
         ocrMs?: number;
       }> = [];
-      const needsOcr: Array<{ pageNumber: number; page: Awaited<ReturnType<typeof pdf.getPage>> }> = [];
+      const needsOcr: number[] = [];
 
       for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
         const page = await pdf.getPage(pageNumber);
@@ -321,8 +255,9 @@ export default function Home() {
         if (!forceOcr && text.replace(/\s/g, "").length >= 40) {
           extracted.push({ page: pageNumber, source: "text", text });
         } else {
-          needsOcr.push({ pageNumber, page });
+          needsOcr.push(pageNumber);
         }
+        page.cleanup();
         setProgress(4 + (pageNumber / pdf.numPages) * 12);
       }
       updatePhase("detect", {
@@ -335,7 +270,6 @@ export default function Home() {
         const engineLabel = ocrEngine === "paddle" ? "PaddleOCR 한국어" : "Tesseract 한국어";
         updatePhase("ocr", { status: "running", detail: `${engineLabel} 초기화` });
         const ocrStart = performance.now();
-        let PSM: (typeof import("tesseract.js"))["PSM"] | null = null;
         let modelInitMs = 0;
         const modelStart = performance.now();
         if (ocrEngine === "paddle") {
@@ -362,7 +296,6 @@ export default function Home() {
           });
         } else {
           const tesseract = await import("tesseract.js");
-          PSM = tesseract.PSM;
           ocrWorker = await tesseract.createWorker(["kor", "eng"], tesseract.OEM.LSTM_ONLY, {
             workerPath: "/vendor/tesseract/worker.min.js",
             corePath: "/vendor/tesseract",
@@ -375,20 +308,18 @@ export default function Home() {
             },
           });
           await ocrWorker.setParameters({
-            tessedit_pageseg_mode: PSM.AUTO,
-            preserve_interword_spaces: "1",
-            user_defined_dpi: "260",
+            tessedit_pageseg_mode: tesseract.PSM.AUTO,
           });
         }
         modelInitMs = elapsed(modelStart);
-        let retryCount = 0;
         let inferenceMs = 0;
 
         for (let index = 0; index < needsOcr.length; index += 1) {
-          const target = needsOcr[index];
-          const baseViewport = target.page.getViewport({ scale: 1 });
+          const pageNumber = needsOcr[index];
+          const page = await pdf.getPage(pageNumber);
+          const baseViewport = page.getViewport({ scale: 1 });
           const scale = Math.min(3.7, 3000 / Math.max(baseViewport.width, baseViewport.height));
-          const viewport = target.page.getViewport({ scale: Math.max(2.1, scale) });
+          const viewport = page.getViewport({ scale: Math.max(2.1, scale) });
           const canvas = document.createElement("canvas");
           canvas.width = Math.ceil(viewport.width);
           canvas.height = Math.ceil(viewport.height);
@@ -396,9 +327,9 @@ export default function Home() {
           if (!context) throw new Error("PDF 페이지를 그릴 수 없습니다.");
           context.fillStyle = "#ffffff";
           context.fillRect(0, 0, canvas.width, canvas.height);
-          await target.page.render({ canvas, canvasContext: context, viewport, background: "#ffffff" }).promise;
+          await page.render({ canvas, canvasContext: context, viewport, background: "#ffffff" }).promise;
           const pageOcrStart = performance.now();
-          let firstAttempt: OcrAttempt;
+          let recognizedPage: OcrAttempt;
           if (ocrEngine === "paddle") {
             const [recognized] = await paddleOcr!.predict(canvas, {
               textDetLimitSideLen: 960,
@@ -407,44 +338,27 @@ export default function Home() {
               textDetBoxThresh: 0.45,
               textRecScoreThresh: 0.25,
             });
-            firstAttempt = paddleResultToAttempt(recognized);
+            recognizedPage = paddleResultToAttempt(recognized);
           } else {
             const recognized = await ocrWorker!.recognize(canvas);
-            firstAttempt = {
-              text: recognized.data.text.trim(),
+            recognizedPage = {
+              text: recognized.data.text,
               confidence: recognized.data.confidence,
             };
-          }
-          let selected = firstAttempt;
-          let retried = false;
-          if (ocrEngine === "tesseract" && shouldRetryOcr(firstAttempt)) {
-            retried = true;
-            retryCount += 1;
-            updatePhase("ocr", { status: "running", detail: `${target.pageNumber}쪽 한글 보정 재처리` });
-            const enhanced = enhanceKoreanDocument(canvas);
-            await ocrWorker!.setParameters({ tessedit_pageseg_mode: PSM!.SPARSE_TEXT });
-            const secondRecognition = await ocrWorker!.recognize(enhanced);
-            selected = chooseBetterOcr(firstAttempt, {
-              text: secondRecognition.data.text.trim(),
-              confidence: secondRecognition.data.confidence,
-            });
-            await ocrWorker!.setParameters({ tessedit_pageseg_mode: PSM!.AUTO });
-            if (enhanced !== canvas) {
-              enhanced.width = 0;
-              enhanced.height = 0;
-            }
           }
           const pageOcrMs = elapsed(pageOcrStart);
           inferenceMs += pageOcrMs;
           extracted.push({
-            page: target.pageNumber,
+            page: pageNumber,
             source: "ocr",
-            text: selected.text,
-            confidence: selected.confidence,
-            retried,
+            text: recognizedPage.text,
+            confidence: recognizedPage.confidence,
             ocrEngine,
             ocrMs: pageOcrMs,
           });
+          canvas.width = 0;
+          canvas.height = 0;
+          page.cleanup();
           updatePhase("ocr", {
             status: "running",
             detail: `${index + 1}/${needsOcr.length}쪽 인식`,
@@ -454,7 +368,7 @@ export default function Home() {
         updatePhase("ocr", {
           status: "done",
           ms: elapsed(ocrStart),
-          detail: `${engineLabel} · 초기화 ${formatMs(modelInitMs)} · 인식 ${formatMs(inferenceMs)}${retryCount ? ` · 재처리 ${retryCount}쪽` : ""}`,
+          detail: `${engineLabel} · 초기화 ${formatMs(modelInitMs)} · 인식 ${formatMs(inferenceMs)} · 단일 인식`,
         });
       } else {
         updatePhase("ocr", { status: "skipped", ms: 0, detail: "OCR 필요한 페이지 없음" });
@@ -633,7 +547,18 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-[1480px] px-5 py-6 lg:px-8 lg:py-8">
+      <Tabs defaultValue="search-lab">
+        <div className="border-b border-[var(--line)] bg-[var(--surface)]">
+          <div className="mx-auto max-w-[1480px] px-5 py-3 lg:px-8">
+            <TabsList aria-label="실험 화면 선택">
+              <TabsTrigger value="search-lab">BM25 검색 실험</TabsTrigger>
+              <TabsTrigger value="ocr-comparison">OCR 엔진 비교</TabsTrigger>
+            </TabsList>
+          </div>
+        </div>
+
+        <TabsContent value="search-lab" className="mt-0">
+          <div className="mx-auto max-w-[1480px] px-5 py-6 lg:px-8 lg:py-8">
         <section className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
           <aside className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)]">
             <p className="eyebrow">01 · SOURCE</p>
@@ -694,7 +619,7 @@ export default function Home() {
               <span>
                 <strong className="block font-semibold">모든 페이지 OCR</strong>
                 <span className="text-xs text-[var(--muted-text)]">
-                  {ocrEngine === "paddle" ? "PaddleOCR로 텍스트 페이지도 다시 인식" : "최대 3,000px·저신뢰 자동 재처리"}
+                  {ocrEngine === "paddle" ? "PaddleOCR로 텍스트 페이지도 다시 인식" : "원본 Canvas·PSM.AUTO·페이지당 1회 인식"}
                 </span>
               </span>
             </label>
@@ -905,7 +830,7 @@ export default function Home() {
                         <span>{page.page}쪽</span>
                         <span className={`source-badge source-${page.source}`}>
                           {page.source === "ocr"
-                            ? `${page.ocrEngine === "paddle" ? "PADDLE" : "TESS"} ${Math.round(page.confidence ?? 0)}%${page.retried ? " · 재처리" : ""}`
+                            ? `${page.ocrEngine === "paddle" ? "PADDLE" : "TESS"} ${Math.round(page.confidence ?? 0)}%`
                             : "TEXT"}
                         </span>
                       </summary>
@@ -1056,7 +981,12 @@ export default function Home() {
             </Tabs>
           )}
         </section>
-      </div>
+          </div>
+        </TabsContent>
+        <TabsContent value="ocr-comparison" className="mt-0">
+          <OcrComparison />
+        </TabsContent>
+      </Tabs>
     </main>
   );
 }
