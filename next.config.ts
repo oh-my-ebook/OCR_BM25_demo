@@ -21,6 +21,10 @@ const nextConfig: NextConfig = {
     });
     config.plugins.push(
       new webpack.IgnorePlugin({ resourceRegExp: /^node:(module|fs|path|url)$/ }),
+      new webpack.NormalModuleReplacementPlugin(
+        /lib[\\/]worker-factory\.ts$/,
+        path.resolve(process.cwd(), "lib/worker-factory.next.ts"),
+      ),
     );
     return config;
   },

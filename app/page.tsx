@@ -40,6 +40,7 @@ import {
   type SearchResult,
   type Token,
 } from "@/lib/bm25";
+import { callKiwi } from "@/lib/kiwi-client";
 
 const ortJsepModuleUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.mjs";
 const ortJsepWasmUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.wasm";
@@ -92,31 +93,6 @@ const initialPhases = (): Phase[] =>
     ms: null,
     detail: "대기",
   }));
-
-let kiwiWorker: Worker | null = null;
-let kiwiSequence = 0;
-const kiwiPending = new Map<
-  number,
-  { resolve: (tokens: Token[]) => void; reject: (error: Error) => void }
->();
-
-function callKiwi(type: "init" | "tokenize", text = "") {
-  if (!kiwiWorker) {
-    kiwiWorker = new Worker(new URL("./kiwi.worker.ts", import.meta.url), { type: "module" });
-    kiwiWorker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; tokens?: Token[]; error?: string }>) => {
-      const pending = kiwiPending.get(event.data.id);
-      if (!pending) return;
-      kiwiPending.delete(event.data.id);
-      if (event.data.ok) pending.resolve(event.data.tokens ?? []);
-      else pending.reject(new Error(event.data.error ?? "Kiwi 분석 실패"));
-    };
-  }
-  const id = ++kiwiSequence;
-  return new Promise<Token[]>((resolve, reject) => {
-    kiwiPending.set(id, { resolve, reject });
-    kiwiWorker!.postMessage({ id, type, text });
-  });
-}
 
 function elapsed(start: number) {
   return Math.round((performance.now() - start) * 10) / 10;
