@@ -5,8 +5,9 @@ import { FileCheck2, Gauge, LoaderCircle, ScanSearch, Upload } from "lucide-reac
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import ortJsepModuleUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
-import ortJsepWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
+
+const ortJsepModuleUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.mjs";
+const ortJsepWasmUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.wasm";
 
 type EngineResult = {
   text: string;
@@ -227,13 +228,14 @@ export default function OcrComparison() {
       setStatus("PDF 페이지 준비 중");
       const pdfjs = await import("pdfjs-dist");
       pdfjs.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.mjs";
-      const pdf = await pdfjs.getDocument({
+      const loadingTask = pdfjs.getDocument({
         data: await file.arrayBuffer(),
         cMapUrl: "/vendor/pdfjs/cmaps/",
         cMapPacked: true,
         standardFontDataUrl: "/vendor/pdfjs/standard_fonts/",
         wasmUrl: "/vendor/pdfjs/wasm/",
-      }).promise;
+      });
+      const pdf = await loadingTask.promise;
       setReferences((current) =>
         Array.from({ length: pdf.numPages }, (_, index) => current[index] ?? ""),
       );
@@ -361,7 +363,7 @@ export default function OcrComparison() {
         canvas.height = 0;
       }
 
-      await pdf.destroy();
+      await loadingTask.destroy();
       setStatus(`${pdf.numPages}쪽 · ${selectedDpi} DPI 비교 완료 · 정답 텍스트를 입력하세요`);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);

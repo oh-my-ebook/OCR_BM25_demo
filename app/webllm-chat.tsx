@@ -1,0 +1,445 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MLCEngineInterface } from "@mlc-ai/web-llm";
+import {
+  Bot,
+  CircleStop,
+  Cpu,
+  Gauge,
+  LoaderCircle,
+  MessageSquareText,
+  RotateCcw,
+  Search,
+  Send,
+  Sparkles,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { Progress } from "@/components/ui/progress";
+import { Textarea } from "@/components/ui/textarea";
+
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type ModelOption = {
+  id: string;
+  vramMB: number;
+  lowResource: boolean;
+};
+
+const RECOMMENDED_MODEL = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
+
+function formatMemory(megabytes: number) {
+  if (!megabytes) return "용량 정보 없음";
+  return megabytes >= 1024
+    ? `약 ${(megabytes / 1024).toFixed(1)}GB VRAM`
+    : `약 ${Math.round(megabytes)}MB VRAM`;
+}
+
+function displayName(modelId: string) {
+  return modelId.replace(/-q4f16_1-MLC(?:-1k)?$/, "").replace(/-MLC$/, "");
+}
+
+export default function WebLLMChat() {
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelFilter, setModelFilter] = useState("");
+  const [selectedModel, setSelectedModel] = useState(RECOMMENDED_MODEL);
+  const [loadedModel, setLoadedModel] = useState("");
+  const [modelStatus, setModelStatus] = useState("WebLLM 모델 목록 확인 중");
+  const [loadProgress, setLoadProgress] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [runtimeStats, setRuntimeStats] = useState("");
+  const [error, setError] = useState("");
+  const [webGpuSupported, setWebGpuSupported] = useState<boolean | null>(null);
+  const engineRef = useRef<MLCEngineInterface | null>(null);
+  const workerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void import("@mlc-ai/web-llm")
+      .then(({ ModelType, prebuiltAppConfig }) => {
+        if (cancelled) return;
+        setWebGpuSupported("gpu" in navigator);
+        const chatModels = prebuiltAppConfig.model_list
+          .filter((model) => (model.model_type ?? ModelType.LLM) === ModelType.LLM)
+          .filter((model) => model.model_id.includes("q4f16_1"))
+          .filter((model) => !/(Coder|Math|Base)/i.test(model.model_id))
+          .filter((model) => (model.vram_required_MB ?? 0) <= 12_000)
+          .map((model) => ({
+            id: model.model_id,
+            vramMB: model.vram_required_MB ?? 0,
+            lowResource: model.low_resource_required ?? false,
+          }))
+          .sort((left, right) => left.vramMB - right.vramMB || left.id.localeCompare(right.id));
+        setModels(chatModels);
+        if (!chatModels.some((model) => model.id === RECOMMENDED_MODEL) && chatModels[0]) {
+          setSelectedModel(chatModels[0].id);
+        }
+        setModelStatus(`${chatModels.length}개 대화용 4비트 모델 사용 가능`);
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+          setModelStatus("모델 목록을 불러오지 못했습니다");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      const engine = engineRef.current;
+      engineRef.current = null;
+      if (engine) void engine.unload().catch(() => undefined);
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
+  const visibleModels = useMemo(() => {
+    const normalized = modelFilter.trim().toLocaleLowerCase("ko-KR");
+    if (!normalized) return models;
+    return models.filter((model) => model.id.toLocaleLowerCase("ko-KR").includes(normalized));
+  }, [modelFilter, models]);
+
+  const selectedModelInfo = models.find((model) => model.id === selectedModel);
+
+  async function loadModel() {
+    if (!selectedModel || loading || generating || webGpuSupported === false) return;
+    setLoading(true);
+    setError("");
+    setRuntimeStats("");
+    setLoadProgress(0);
+    setModelStatus("모델 파일 준비 중");
+
+    try {
+      if (engineRef.current) {
+        await engineRef.current.reload(selectedModel);
+      } else {
+        const webllm = await import("@mlc-ai/web-llm");
+        const worker = new Worker(new URL("./webllm.worker.ts", import.meta.url), { type: "module" });
+        workerRef.current = worker;
+        engineRef.current = await webllm.CreateWebWorkerMLCEngine(worker, selectedModel, {
+          initProgressCallback: (report) => {
+            setLoadProgress(Math.round(report.progress * 100));
+            setModelStatus(report.text);
+          },
+          logLevel: "WARN",
+        });
+      }
+      setLoadedModel(selectedModel);
+      setMessages([]);
+      setLoadProgress(100);
+      setModelStatus("모델 준비 완료 · 모든 추론은 이 브라우저에서 실행됩니다");
+    } catch (caught) {
+      setLoadedModel("");
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setModelStatus("모델 로딩 실패");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function sendMessage(event: React.FormEvent) {
+    event.preventDefault();
+    const question = input.trim();
+    const engine = engineRef.current;
+    if (!question || !engine || !loadedModel || generating) return;
+
+    const history: ChatMessage[] = [...messages, { role: "user", content: question }];
+    setMessages([...history, { role: "assistant", content: "" }]);
+    setInput("");
+    setError("");
+    setRuntimeStats("");
+    setGenerating(true);
+
+    try {
+      const chunks = await engine.chat.completions.create({
+        model: loadedModel,
+        messages: [
+          {
+            role: "system",
+            content:
+              "당신은 친절하고 정확한 한국어 AI 도우미입니다. 사용자가 다른 언어를 요청하지 않는 한 한국어로 답하세요.",
+          },
+          ...history,
+        ],
+        stream: true,
+        stream_options: { include_usage: true },
+        temperature: 0.7,
+      });
+
+      let answer = "";
+      for await (const chunk of chunks) {
+        answer += chunk.choices[0]?.delta.content ?? "";
+        setMessages([...history, { role: "assistant", content: answer }]);
+      }
+      setRuntimeStats(await engine.runtimeStatsText(loadedModel));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setMessages((current) =>
+        current.map((message, index) =>
+          index === current.length - 1 && message.role === "assistant" && !message.content
+            ? { ...message, content: "응답 생성이 중단되었거나 실패했습니다." }
+            : message,
+        ),
+      );
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function resetChat() {
+    if (generating) engineRef.current?.interruptGenerate();
+    await engineRef.current?.resetChat();
+    setMessages([]);
+    setRuntimeStats("");
+    setError("");
+  }
+
+  return (
+    <div className="mx-auto max-w-[1480px] px-5 py-6 lg:px-8 lg:py-8">
+      <section className="grid gap-5 xl:grid-cols-[390px_minmax(0,1fr)]">
+        <aside className="space-y-5">
+          <section className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)]">
+            <p className="eyebrow">01 · MODEL</p>
+            <div className="mt-2 flex items-center gap-2">
+              <Sparkles className="size-5 text-[var(--accent-strong)]" />
+              <h2 className="text-xl font-bold tracking-tight">WebLLM 모델 선택</h2>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-[var(--muted-text)]">
+              한국어 전용 사전 빌드 모델은 없어 다국어 성능과 메모리 균형이 좋은 Qwen2.5 1.5B를 기본
+              추천합니다.
+            </p>
+
+            <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-3">
+              <strong className="block text-sm text-blue-900">추천 · Qwen2.5 1.5B Instruct</strong>
+              <span className="mt-1 block text-xs leading-5 text-blue-800">
+                4비트 양자화 · 약 1.6GB VRAM · 한국어 채팅 입문용
+              </span>
+            </div>
+
+            <label
+              className="mt-5 block text-xs font-bold text-[var(--muted-text)]"
+              htmlFor="model-filter"
+            >
+              모델 검색
+            </label>
+            <div className="relative mt-2">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--muted-text)]" />
+              <Input
+                id="model-filter"
+                value={modelFilter}
+                onChange={(event) => setModelFilter(event.target.value)}
+                placeholder="Qwen, Llama, Gemma..."
+                className="pl-9"
+                disabled={loading || generating}
+              />
+            </div>
+
+            <label
+              className="mt-4 block text-xs font-bold text-[var(--muted-text)]"
+              htmlFor="webllm-model"
+            >
+              대화용 4비트 모델 · {visibleModels.length}개
+            </label>
+            <NativeSelect
+              id="webllm-model"
+              value={selectedModel}
+              onChange={(event) => setSelectedModel(event.target.value)}
+              className="mt-2 w-full"
+              disabled={!visibleModels.length || loading || generating}
+            >
+              {visibleModels.map((model) => (
+                <NativeSelectOption key={model.id} value={model.id}>
+                  {displayName(model.id)} · {formatMemory(model.vramMB)}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+
+            {selectedModelInfo && (
+              <div className="mt-3 flex items-center justify-between text-xs text-[var(--muted-text)]">
+                <span>{formatMemory(selectedModelInfo.vramMB)}</span>
+                <span>{selectedModelInfo.lowResource ? "저사양 기기 고려" : "데스크톱 권장"}</span>
+              </div>
+            )}
+
+            <Button
+              className="mt-4 w-full"
+              onClick={() => void loadModel()}
+              disabled={loading || generating || !selectedModel || webGpuSupported === false}
+            >
+              {loading ? <LoaderCircle className="animate-spin" /> : <Cpu />}
+              {loading
+                ? "모델 불러오는 중"
+                : loadedModel === selectedModel
+                  ? "모델 다시 불러오기"
+                  : "이 모델 불러오기"}
+            </Button>
+
+            {(loading || loadProgress > 0) && <Progress value={loadProgress} className="mt-4" />}
+            <p className="mt-2 break-words text-xs leading-5 text-[var(--muted-text)]">
+              {modelStatus}
+            </p>
+            {error && (
+              <p className="mt-3 rounded-lg bg-red-50 p-3 text-xs leading-5 text-red-700">
+                {error}
+              </p>
+            )}
+          </section>
+
+          <section className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)]">
+            <div className="flex items-center gap-2">
+              <Gauge className="size-4 text-[var(--accent-strong)]" />
+              <h3 className="font-bold">실행 상태</h3>
+            </div>
+            <dl className="mt-4 space-y-3 text-sm">
+              <StatusRow
+                label="WebGPU"
+                value={
+                  webGpuSupported === null
+                    ? "확인 중"
+                    : webGpuSupported
+                      ? "사용 가능"
+                      : "지원 안 됨"
+                }
+              />
+              <StatusRow label="실행 위치" value="브라우저 로컬" />
+              <StatusRow label="Worker" value="별도 스레드" />
+              <StatusRow
+                label="현재 모델"
+                value={loadedModel ? displayName(loadedModel) : "미로딩"}
+              />
+            </dl>
+            {runtimeStats && (
+              <pre className="mt-4 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-300">
+                {runtimeStats}
+              </pre>
+            )}
+          </section>
+        </aside>
+
+        <section className="flex min-h-[680px] min-w-0 flex-col overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] shadow-[var(--shadow)]">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
+            <div className="flex items-center gap-3">
+              <div className="grid size-9 place-items-center rounded-lg bg-[var(--ink)] text-white">
+                <Bot className="size-5" />
+              </div>
+              <div>
+                <h2 className="font-bold">브라우저 로컬 채팅</h2>
+                <p className="text-xs text-[var(--muted-text)]">
+                  {loadedModel ? displayName(loadedModel) : "왼쪽에서 모델을 먼저 불러오세요"}
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              {generating && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => engineRef.current?.interruptGenerate()}
+                >
+                  <CircleStop /> 중지
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void resetChat()}
+                disabled={!messages.length && !generating}
+              >
+                <RotateCcw /> 대화 초기화
+              </Button>
+            </div>
+          </header>
+
+          <div className="flex-1 overflow-y-auto p-5 lg:p-6">
+            {!messages.length ? (
+              <div className="grid h-full min-h-96 place-items-center text-center">
+                <div>
+                  <MessageSquareText className="mx-auto size-9 text-[var(--accent-strong)]" />
+                  <h3 className="mt-4 text-lg font-bold">모델과 직접 대화해 보세요</h3>
+                  <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-[var(--muted-text)]">
+                    첫 실행에는 모델 파일 다운로드가 필요합니다. 이후 파일은 브라우저 캐시에
+                    저장되며 질문과 답변은 외부 API로 전송되지 않습니다.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {messages.map((message, index) => (
+                  <article
+                    key={`${message.role}-${index}`}
+                    className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.role === "user" ? "bg-[var(--ink)] text-white" : "border border-[var(--line)] bg-[var(--panel)] text-slate-700"}`}
+                    >
+                      <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider opacity-60">
+                        {message.role === "user" ? "You" : "Local model"}
+                      </span>
+                      <p className="whitespace-pre-wrap">
+                        {message.content || <LoaderCircle className="size-4 animate-spin" />}
+                      </p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <form
+            onSubmit={sendMessage}
+            className="border-t border-[var(--line)] bg-[var(--panel)] p-4 lg:p-5"
+          >
+            <div className="flex items-end gap-2">
+              <Textarea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                disabled={!loadedModel || loading || generating}
+                placeholder={
+                  loadedModel
+                    ? "메시지를 입력하세요 · Shift+Enter 줄바꿈"
+                    : "모델을 불러오면 채팅할 수 있습니다"
+                }
+                className="min-h-12 max-h-40 resize-none bg-white"
+              />
+              <Button
+                type="submit"
+                size="lg"
+                className="h-12 shrink-0"
+                disabled={!loadedModel || !input.trim() || loading || generating}
+              >
+                {generating ? <LoaderCircle className="animate-spin" /> : <Send />}
+                보내기
+              </Button>
+            </div>
+          </form>
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function StatusRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] pb-3 last:border-0 last:pb-0">
+      <dt className="font-semibold">{label}</dt>
+      <dd className="max-w-[220px] text-right text-xs leading-5 text-[var(--muted-text)]">
+        {value}
+      </dd>
+    </div>
+  );
+}

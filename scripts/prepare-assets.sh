@@ -7,6 +7,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PUBLIC_DIR="$PROJECT_DIR/public"
 VENDOR_DIR="$PUBLIC_DIR/vendor"
 KIWI_DIR="$PUBLIC_DIR/kiwi"
+ONNXRUNTIME_DIR="$VENDOR_DIR/onnxruntime"
 
 DETECTION_URL="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv5_mobile_det_onnx_infer.tar"
 KOREAN_MODEL_REVISION="5c6f574b8e2230adf4287b33e736d71b9fabd28e"
@@ -42,6 +43,8 @@ require_command tar
 require_file "$PROJECT_DIR/node_modules/kiwi-nlp/dist/kiwi-wasm.wasm"
 require_file "$PROJECT_DIR/node_modules/pdfjs-dist/build/pdf.worker.min.mjs"
 require_file "$PROJECT_DIR/node_modules/sql.js/dist/sql-wasm.wasm"
+require_file "$PROJECT_DIR/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs"
+require_file "$PROJECT_DIR/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm"
 require_file "$PROJECT_DIR/node_modules/tesseract.js/dist/worker.min.js"
 require_file "$PROJECT_DIR/node_modules/tesseract.js-core/tesseract-core-lstm.wasm"
 require_file "$PROJECT_DIR/node_modules/@tesseract.js-data/kor/4.0.0/kor.traineddata.gz"
@@ -50,6 +53,7 @@ mkdir -p \
   "$KIWI_DIR/model" \
   "$VENDOR_DIR/paddleocr" \
   "$VENDOR_DIR/pdfjs" \
+  "$ONNXRUNTIME_DIR" \
   "$VENDOR_DIR/tesseract" \
   "$VENDOR_DIR/tessdata"
 
@@ -60,6 +64,8 @@ cp -R "$PROJECT_DIR/node_modules/pdfjs-dist/cmaps" "$VENDOR_DIR/pdfjs/"
 cp -R "$PROJECT_DIR/node_modules/pdfjs-dist/standard_fonts" "$VENDOR_DIR/pdfjs/"
 cp -R "$PROJECT_DIR/node_modules/pdfjs-dist/wasm" "$VENDOR_DIR/pdfjs/"
 cp "$PROJECT_DIR/node_modules/sql.js/dist/sql-wasm.wasm" "$VENDOR_DIR/sql-wasm.wasm"
+cp "$PROJECT_DIR/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs" "$ONNXRUNTIME_DIR/"
+cp "$PROJECT_DIR/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm" "$ONNXRUNTIME_DIR/"
 cp "$PROJECT_DIR/node_modules/tesseract.js/dist/worker.min.js" "$VENDOR_DIR/tesseract/worker.min.js"
 
 for core_name in \

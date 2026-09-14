@@ -18,6 +18,7 @@ import {
   Scissors,
   Search,
   SearchX,
+  Sparkles,
   TableProperties,
   Upload,
 } from "lucide-react";
@@ -27,10 +28,8 @@ import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import ortJsepModuleUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.mjs?url";
-import ortJsepWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.jsep.wasm?url";
-import KiwiWorker from "./kiwi.worker?worker";
 import OcrComparison from "./ocr-comparison";
+import WebLLMChat from "./webllm-chat";
 import {
   chunkText,
   highlight,
@@ -41,6 +40,9 @@ import {
   type SearchResult,
   type Token,
 } from "@/lib/bm25";
+
+const ortJsepModuleUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.mjs";
+const ortJsepWasmUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.wasm";
 
 type PhaseId = "detect" | "ocr" | "kiwi" | "chunk" | "sqlite";
 type OcrEngine = "paddle" | "tesseract";
@@ -100,7 +102,7 @@ const kiwiPending = new Map<
 
 function callKiwi(type: "init" | "tokenize", text = "") {
   if (!kiwiWorker) {
-    kiwiWorker = new KiwiWorker();
+    kiwiWorker = new Worker(new URL("./kiwi.worker.ts", import.meta.url), { type: "module" });
     kiwiWorker.onmessage = (event: MessageEvent<{ id: number; ok: boolean; tokens?: Token[]; error?: string }>) => {
       const pending = kiwiPending.get(event.data.id);
       if (!pending) return;
@@ -553,6 +555,7 @@ export default function Home() {
             <TabsList aria-label="실험 화면 선택">
               <TabsTrigger value="search-lab">BM25 검색 실험</TabsTrigger>
               <TabsTrigger value="ocr-comparison">OCR 엔진 비교</TabsTrigger>
+              <TabsTrigger value="webllm-chat"><Sparkles /> WebLLM 채팅</TabsTrigger>
             </TabsList>
           </div>
         </div>
@@ -985,6 +988,9 @@ export default function Home() {
         </TabsContent>
         <TabsContent value="ocr-comparison" className="mt-0">
           <OcrComparison />
+        </TabsContent>
+        <TabsContent value="webllm-chat" className="mt-0">
+          <WebLLMChat />
         </TabsContent>
       </Tabs>
     </main>
