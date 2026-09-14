@@ -100,7 +100,7 @@ else
   echo "기존 PaddleOCR 한국어 인식 모델 사용"
 fi
 
-KIWI_REQUIRED=(combiningRule.txt default.dict extract.mdl cong.mdl nounchr.mdl)
+KIWI_REQUIRED=(combiningRule.txt default.dict extract.mdl cong.mdl nounchr.mdl sj.morph)
 KIWI_READY=true
 for model_name in "${KIWI_REQUIRED[@]}"; do
   if [[ ! -s "$KIWI_DIR/model/$model_name" ]]; then
