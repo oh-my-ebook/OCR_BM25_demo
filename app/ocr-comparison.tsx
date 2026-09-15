@@ -5,15 +5,19 @@ import { FileCheck2, Gauge, LoaderCircle, ScanSearch, Upload } from "lucide-reac
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-
-const ortJsepModuleUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.mjs";
-const ortJsepWasmUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.wasm";
+import { callKiwi } from "@/lib/kiwi-client";
+import { combineOcrRegions, type OcrEnsemble, type OcrRegion } from "@/lib/ocr-ensemble";
+import { getPaddleOrtWasmPaths } from "@/lib/paddle-ort";
 
 type EngineResult = {
   text: string;
   confidence: number;
   ms: number;
+  regions: OcrRegion[];
 };
+
+type EnsembleResult = OcrEnsemble & { ms: number };
+type KiwiResults = { tesseract: string; paddle: string; ensemble: string };
 
 type PageComparison = {
   page: number;
@@ -22,6 +26,7 @@ type PageComparison = {
   imageHeight: number;
   tesseract: EngineResult;
   paddle: EngineResult;
+  ensemble: EnsembleResult;
 };
 
 type ComparisonTimings = {
@@ -147,7 +152,7 @@ function measureAccuracy(reference: string, candidate: string): Accuracy | null 
 function aggregateAccuracy(
   pages: PageComparison[],
   references: string[],
-  engine: "tesseract" | "paddle",
+  engine: "tesseract" | "paddle" | "ensemble",
 ): (Accuracy & { evaluatedPages: number }) | null {
   let distance = 0;
   let referenceLength = 0;
@@ -190,6 +195,12 @@ function formatErrors(accuracy: Accuracy | null) {
   return `삭제 ${accuracy.deletions} · 삽입 ${accuracy.insertions} · 치환 ${accuracy.substitutions}`;
 }
 
+function formatCerComparison(before: Accuracy | null, after: Accuracy | null) {
+  if (!before || !after) return "정답 입력 시 CER 비교";
+  const delta = (after.cer - before.cer) * 100;
+  return `CER ${formatPercent(before.cer)} → ${formatPercent(after.cer)} · ${delta <= 0 ? "개선" : "악화"} ${Math.abs(delta).toFixed(2)}%p`;
+}
+
 export default function OcrComparison() {
   const [file, setFile] = useState<File | null>(null);
   const [results, setResults] = useState<PageComparison[]>([]);
@@ -200,6 +211,8 @@ export default function OcrComparison() {
   const [status, setStatus] = useState("PDF를 선택하세요");
   const [error, setError] = useState("");
   const [dpi, setDpi] = useState<Dpi>(300);
+  const [kiwiResults, setKiwiResults] = useState<Record<number, KiwiResults>>({});
+  const [postprocessingPage, setPostprocessingPage] = useState<number | null>(null);
 
   const tesseractAccuracy = useMemo(
     () => aggregateAccuracy(results, references, "tesseract"),
@@ -209,14 +222,42 @@ export default function OcrComparison() {
     () => aggregateAccuracy(results, references, "paddle"),
     [results, references],
   );
+  const ensembleAccuracy = useMemo(
+    () => aggregateAccuracy(results, references, "ensemble"),
+    [results, references],
+  );
   const tesseractInferenceMs = results.reduce((sum, page) => sum + page.tesseract.ms, 0);
   const paddleInferenceMs = results.reduce((sum, page) => sum + page.paddle.ms, 0);
+  const ensembleInferenceMs = results.reduce((sum, page) => sum + page.ensemble.ms, 0);
+
+  async function postprocess(result: PageComparison) {
+    if (postprocessingPage !== null) return;
+    setPostprocessingPage(result.page);
+    setError("");
+    try {
+      await callKiwi("init");
+      const [tesseract, paddle, ensemble] = await Promise.all([
+        callKiwi("postprocess", result.tesseract.text),
+        callKiwi("postprocess", result.paddle.text),
+        callKiwi("postprocess", result.ensemble.text),
+      ]);
+      setKiwiResults((current) => ({
+        ...current,
+        [result.page]: { tesseract, paddle, ensemble },
+      }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setPostprocessingPage(null);
+    }
+  }
 
   async function compare() {
     if (!file || running) return;
     const selectedDpi = dpi;
     setRunning(true);
     setResults([]);
+    setKiwiResults({});
     setTimings(emptyTimings);
     setProgress(1);
     setError("");
@@ -264,6 +305,7 @@ export default function OcrComparison() {
 
       setStatus("PaddleOCR 한국어 모델 초기화");
       const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
+      const wasmPaths = await getPaddleOrtWasmPaths();
       const paddleInitStart = performance.now();
       paddleOcr = await PaddleOCR.create({
         worker: false,
@@ -274,10 +316,7 @@ export default function OcrComparison() {
         textRecognitionBatchSize: 8,
         ortOptions: {
           backend: "wasm",
-          wasmPaths: {
-            mjs: ortJsepModuleUrl,
-            wasm: ortJsepWasmUrl,
-          } as unknown as string,
+          wasmPaths,
           numThreads: 1,
           simd: true,
         },
@@ -304,11 +343,19 @@ export default function OcrComparison() {
 
         const recognizeTesseract = async (): Promise<EngineResult> => {
           const start = performance.now();
-          const recognized = await tesseractWorker!.recognize(canvas);
+          const recognized = await tesseractWorker!.recognize(canvas, {}, { text: true, blocks: true });
+          const regions = (recognized.data.blocks ?? []).flatMap((block) =>
+            block.paragraphs.flatMap((paragraph) =>
+              paragraph.lines
+                .filter((line) => line.text.trim())
+                .map((line) => ({ text: line.text.trim(), confidence: line.confidence, ...line.bbox })),
+            ),
+          );
           return {
             text: recognized.data.text.trim(),
             confidence: recognized.data.confidence,
             ms: elapsed(start),
+            regions,
           };
         };
 
@@ -330,12 +377,21 @@ export default function OcrComparison() {
               const rightX = Math.min(...right.poly.map((point) => point[0]));
               return Math.abs(leftY - rightY) < 12 ? leftX - rightX : leftY - rightY;
             });
+          const regions = items.map((item) => ({
+            text: item.text.trim(),
+            confidence: item.score * 100,
+            x0: Math.min(...item.poly.map((point) => point[0])),
+            y0: Math.min(...item.poly.map((point) => point[1])),
+            x1: Math.max(...item.poly.map((point) => point[0])),
+            y1: Math.max(...item.poly.map((point) => point[1])),
+          }));
           return {
             text: items.map((item) => item.text.trim()).join("\n"),
             confidence: items.length
               ? (items.reduce((sum, item) => sum + item.score, 0) / items.length) * 100
               : 0,
             ms: elapsed(start),
+            regions,
           };
         };
 
@@ -349,6 +405,16 @@ export default function OcrComparison() {
           tesseract = await recognizeTesseract();
         }
 
+        const ensembleStart = performance.now();
+        const combined = combineOcrRegions(tesseract.regions, paddle.regions);
+        const fallback = tesseract.confidence >= paddle.confidence ? tesseract : paddle;
+        const ensemble: EnsembleResult = {
+          ...combined,
+          text: combined.text || fallback.text,
+          confidence: combined.text ? combined.confidence : fallback.confidence,
+          ms: tesseract.ms + paddle.ms + elapsed(ensembleStart),
+        };
+
         comparisons.push({
           page: pageNumber,
           dpi: selectedDpi,
@@ -356,6 +422,7 @@ export default function OcrComparison() {
           imageHeight: canvas.height,
           tesseract,
           paddle,
+          ensemble,
         });
         setResults([...comparisons]);
         setProgress(20 + (pageNumber / pdf.numPages) * 80);
@@ -383,7 +450,7 @@ export default function OcrComparison() {
           <p className="eyebrow">OCR BENCHMARK</p>
           <h2 className="mt-2 text-xl font-bold tracking-tight">같은 페이지, 두 엔진</h2>
           <p className="mt-2 text-sm leading-6 text-[var(--muted-text)]">
-            선택한 DPI로 한 번 렌더링한 동일 Canvas를 두 엔진에 전달합니다. 홀수·짝수 페이지의 실행 순서를 바꿔 순서 편향을 줄입니다.
+            선택한 DPI로 한 번 렌더링한 동일 Canvas를 두 엔진에 전달합니다. 원본 결과는 유지하고, 같은 행의 신뢰도를 비교한 결합 결과를 별도로 만듭니다.
           </p>
 
           <label className="mt-5 flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--accent-soft)] px-5 text-center transition hover:border-[var(--accent-strong)]">
@@ -401,6 +468,7 @@ export default function OcrComparison() {
                 const selected = event.target.files?.[0] ?? null;
                 setFile(selected);
                 setResults([]);
+                setKiwiResults({});
                 setReferences([]);
                 setTimings(emptyTimings);
                 setProgress(0);
@@ -420,6 +488,7 @@ export default function OcrComparison() {
               onChange={(event) => {
                 setDpi(Number(event.target.value) as Dpi);
                 setResults([]);
+                setKiwiResults({});
                 setTimings(emptyTimings);
                 setProgress(0);
                 setError("");
@@ -460,7 +529,7 @@ export default function OcrComparison() {
               <p>비교 실행 후 속도가 나타납니다. 페이지별 정답을 붙여 넣으면 정확도도 즉시 계산됩니다.</p>
             </div>
           ) : (
-            <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <div className="mt-5 grid gap-4 lg:grid-cols-3">
               <EngineSummary
                 name="Tesseract"
                 model="kor + eng · LSTM"
@@ -477,6 +546,14 @@ export default function OcrComparison() {
                 inferenceMs={paddleInferenceMs}
                 pageCount={results.length}
               />
+              <EngineSummary
+                name="신뢰도 결합"
+                model="행 좌표 매칭 · 불일치 시 높은 confidence · 단독 행 50 이상"
+                accuracy={ensembleAccuracy}
+                initMs={timings.tesseractInitMs + timings.paddleInitMs}
+                inferenceMs={ensembleInferenceMs}
+                pageCount={results.length}
+              />
             </div>
           )}
         </section>
@@ -488,6 +565,11 @@ export default function OcrComparison() {
             const reference = references[result.page - 1] ?? "";
             const tesseractPageAccuracy = measureAccuracy(reference, result.tesseract.text);
             const paddlePageAccuracy = measureAccuracy(reference, result.paddle.text);
+            const ensemblePageAccuracy = measureAccuracy(reference, result.ensemble.text);
+            const kiwi = kiwiResults[result.page];
+            const kiwiTesseractAccuracy = kiwi ? measureAccuracy(reference, kiwi.tesseract) : null;
+            const kiwiPaddleAccuracy = kiwi ? measureAccuracy(reference, kiwi.paddle) : null;
+            const kiwiEnsembleAccuracy = kiwi ? measureAccuracy(reference, kiwi.ensemble) : null;
             return (
               <article key={result.page} className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)] lg:p-6">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -496,7 +578,7 @@ export default function OcrComparison() {
                     {result.dpi} DPI · {result.imageWidth}×{result.imageHeight}px · 두 모델 동일 입력
                   </span>
                 </div>
-                <div className="mt-4 grid gap-4 xl:grid-cols-3">
+                <div className="mt-4 grid gap-4 xl:grid-cols-4">
                   <ResultColumn title="정답 텍스트" meta="사람이 검수한 원문">
                     <Textarea
                       value={reference}
@@ -522,6 +604,44 @@ export default function OcrComparison() {
                   >
                     <Textarea readOnly value={result.paddle.text} className="min-h-72 resize-y font-mono text-sm leading-6" aria-label={`${result.page}쪽 PaddleOCR 결과`} />
                   </ResultColumn>
+                  <ResultColumn
+                    title="신뢰도 결합"
+                    meta={`${formatMs(result.ensemble.ms)} · confidence ${result.ensemble.confidence.toFixed(1)} · 일치 ${result.ensemble.agreements} / 충돌 ${result.ensemble.conflicts} / 단독 ${result.ensemble.unmatchedAccepted} / 제외 ${result.ensemble.dropped} · T ${result.ensemble.tesseractChosen} / P ${result.ensemble.paddleChosen} · ${ensemblePageAccuracy ? `CER ${formatPercent(ensemblePageAccuracy.cer)} · ${formatErrors(ensemblePageAccuracy)}` : "정답 대기"}`}
+                  >
+                    <Textarea readOnly value={result.ensemble.text} className="min-h-72 resize-y font-mono text-sm leading-6" aria-label={`${result.page}쪽 신뢰도 결합 결과`} />
+                  </ResultColumn>
+                </div>
+                <div className="mt-5 rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h4 className="font-bold">Kiwi 후처리</h4>
+                      <p className="mt-1 text-xs leading-5 text-[var(--muted-text)]">
+                        세 결과에 동일한 형태소 분석·재결합을 적용합니다. 원본 OCR과 점수는 변경하지 않습니다.
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={postprocessingPage !== null}
+                      onClick={() => void postprocess(result)}
+                    >
+                      {postprocessingPage === result.page && <LoaderCircle className="animate-spin" />}
+                      {kiwi ? "다시 후처리" : "후처리 결과 만들기"}
+                    </Button>
+                  </div>
+                  {kiwi && (
+                    <div className="mt-4 grid gap-4 xl:grid-cols-3">
+                      <ResultColumn title="Tesseract + Kiwi" meta={formatCerComparison(tesseractPageAccuracy, kiwiTesseractAccuracy)}>
+                        <Textarea readOnly value={kiwi.tesseract} className="min-h-52 resize-y font-mono text-sm leading-6" aria-label={`${result.page}쪽 Tesseract Kiwi 후처리 결과`} />
+                      </ResultColumn>
+                      <ResultColumn title="PaddleOCR + Kiwi" meta={formatCerComparison(paddlePageAccuracy, kiwiPaddleAccuracy)}>
+                        <Textarea readOnly value={kiwi.paddle} className="min-h-52 resize-y font-mono text-sm leading-6" aria-label={`${result.page}쪽 PaddleOCR Kiwi 후처리 결과`} />
+                      </ResultColumn>
+                      <ResultColumn title="신뢰도 결합 + Kiwi" meta={formatCerComparison(ensemblePageAccuracy, kiwiEnsembleAccuracy)}>
+                        <Textarea readOnly value={kiwi.ensemble} className="min-h-52 resize-y font-mono text-sm leading-6" aria-label={`${result.page}쪽 신뢰도 결합 Kiwi 후처리 결과`} />
+                      </ResultColumn>
+                    </div>
+                  )}
                 </div>
               </article>
             );
@@ -531,12 +651,15 @@ export default function OcrComparison() {
 
       <section className="mt-5 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)] lg:p-6">
         <h2 className="text-lg font-bold">비교 조건</h2>
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="mt-4 grid gap-3 lg:grid-cols-3">
           <ComparisonNote title="Tesseract">
             선택한 DPI의 공통 Canvas를 PSM.AUTO와 kor+eng LSTM으로 한 번만 인식합니다. 저신뢰 대비 보정·재시도는 사용하지 않습니다.
           </ComparisonNote>
           <ComparisonNote title="PaddleOCR">
             같은 공통 Canvas를 사용하며 긴 변 1600px, box 0.45, rec 0.25를 모든 DPI에서 고정합니다. 엔진 내부 리사이즈는 각 모델 파이프라인의 일부입니다.
+          </ComparisonNote>
+          <ComparisonNote title="신뢰도 결합">
+            겹치는 행은 두 엔진 중 confidence가 높은 문자열을 선택하고, 한 엔진만 찾은 행은 50 이상일 때 포함합니다. 모델별 confidence가 보정된 확률은 아니므로 결합 CER을 별도로 확인해야 합니다.
           </ComparisonNote>
         </div>
       </section>

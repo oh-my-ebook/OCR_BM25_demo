@@ -363,6 +363,9 @@ export default function WebLLMChat() {
         stream_options: { include_usage: true },
         temperature: indexedChunks.length ? 0.2 : 0.7,
         max_tokens: 2000,
+        extra_body: {
+          enable_thinking: true,
+        },
       });
 
       let answer = "";

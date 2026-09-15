@@ -14,7 +14,11 @@
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "check:bm25": "node --experimental-strip-types scripts/check-bm25.ts"
+    "check:bm25": "node --experimental-strip-types scripts/check-bm25.ts",
+    "check:ocr-ensemble": "node --experimental-strip-types scripts/check-ocr-ensemble.ts",
+    "check:ocr-layer": "node --experimental-strip-types scripts/check-ocr-text-layer.ts",
+    "check:kiwi-postprocess": "node --experimental-strip-types scripts/check-kiwi-postprocess.ts",
+    "check:paddle-ort": "node --experimental-strip-types scripts/check-paddle-ort.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

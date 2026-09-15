@@ -13,6 +13,7 @@ import {
   Languages,
   LoaderCircle,
   LockKeyhole,
+  MousePointer2,
   RotateCcw,
   ScanText,
   Scissors,
@@ -29,6 +30,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import OcrComparison from "./ocr-comparison";
+import PaddlePdfViewer from "./paddle-pdf-viewer";
 import WebLLMChat from "./webllm-chat";
 import {
   chunkText,
@@ -41,9 +43,7 @@ import {
   type Token,
 } from "@/lib/bm25";
 import { callKiwi } from "@/lib/kiwi-client";
-
-const ortJsepModuleUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.mjs";
-const ortJsepWasmUrl = "/vendor/onnxruntime/ort-wasm-simd-threaded.jsep.wasm";
+import { getPaddleOrtWasmPaths } from "@/lib/paddle-ort";
 
 type PhaseId = "detect" | "ocr" | "kiwi" | "chunk" | "sqlite";
 type OcrEngine = "paddle" | "tesseract";
@@ -252,6 +252,7 @@ export default function Home() {
         const modelStart = performance.now();
         if (ocrEngine === "paddle") {
           const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
+          const wasmPaths = await getPaddleOrtWasmPaths();
           paddleOcr = await PaddleOCR.create({
             // Vinext currently rebundles the SDK worker in a way that can make
             // OpenCV reference `window` inside WorkerGlobalScope. Main-thread
@@ -264,10 +265,7 @@ export default function Home() {
             textRecognitionBatchSize: 8,
             ortOptions: {
               backend: "wasm",
-              wasmPaths: {
-                mjs: ortJsepModuleUrl,
-                wasm: ortJsepWasmUrl,
-              } as unknown as string,
+              wasmPaths,
               numThreads: 1,
               simd: true,
             },
@@ -531,6 +529,7 @@ export default function Home() {
             <TabsList aria-label="실험 화면 선택">
               <TabsTrigger value="search-lab">BM25 검색 실험</TabsTrigger>
               <TabsTrigger value="ocr-comparison">OCR 엔진 비교</TabsTrigger>
+              <TabsTrigger value="selectable-pdf"><MousePointer2 /> 텍스트 선택 PDF</TabsTrigger>
               <TabsTrigger value="webllm-chat"><Sparkles /> WebLLM 채팅</TabsTrigger>
             </TabsList>
           </div>
@@ -964,6 +963,9 @@ export default function Home() {
         </TabsContent>
         <TabsContent value="ocr-comparison" className="mt-0">
           <OcrComparison />
+        </TabsContent>
+        <TabsContent value="selectable-pdf" className="mt-0">
+          <PaddlePdfViewer />
         </TabsContent>
         <TabsContent value="webllm-chat" className="mt-0">
           <WebLLMChat />

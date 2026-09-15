@@ -2,6 +2,7 @@
 
 import { KiwiBuilder, Match } from "kiwi-nlp";
 import type { Kiwi } from "kiwi-nlp";
+import { postprocessKiwiText } from "@/lib/kiwi-postprocess";
 
 const modelNames = [
   "combiningRule.txt",
@@ -28,12 +29,16 @@ function getKiwi() {
   return kiwiPromise;
 }
 
-self.onmessage = async (event: MessageEvent<{ id: number; type: "init" | "tokenize"; text?: string }>) => {
+self.onmessage = async (event: MessageEvent<{ id: number; type: "init" | "tokenize" | "postprocess"; text?: string }>) => {
   const { id, type, text = "" } = event.data;
   try {
     const kiwi = await getKiwi();
-    const tokens = type === "tokenize" ? kiwi.tokenize(text, Match.allWithNormalizing) : [];
-    self.postMessage({ id, ok: true, tokens });
+    if (type === "postprocess") {
+      self.postMessage({ id, ok: true, text: postprocessKiwiText(kiwi, text) });
+    } else {
+      const tokens = type === "tokenize" ? kiwi.tokenize(text, Match.allWithNormalizing) : [];
+      self.postMessage({ id, ok: true, tokens });
+    }
   } catch (error) {
     self.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
   }

@@ -5,19 +5,21 @@ let kiwiWorker: Worker | null = null;
 let kiwiSequence = 0;
 const kiwiPending = new Map<
   number,
-  { resolve: (tokens: Token[]) => void; reject: (error: Error) => void }
+  { resolve: (result: Token[] | string) => void; reject: (error: Error) => void }
 >();
 
-export function callKiwi(type: "init" | "tokenize", text = "") {
+export function callKiwi(type: "init" | "tokenize", text?: string): Promise<Token[]>;
+export function callKiwi(type: "postprocess", text: string): Promise<string>;
+export function callKiwi(type: "init" | "tokenize" | "postprocess", text = "") {
   if (!kiwiWorker) {
     kiwiWorker = createKiwiWorker();
     kiwiWorker.onmessage = (
-      event: MessageEvent<{ id: number; ok: boolean; tokens?: Token[]; error?: string }>,
+      event: MessageEvent<{ id: number; ok: boolean; tokens?: Token[]; text?: string; error?: string }>,
     ) => {
       const pending = kiwiPending.get(event.data.id);
       if (!pending) return;
       kiwiPending.delete(event.data.id);
-      if (event.data.ok) pending.resolve(event.data.tokens ?? []);
+      if (event.data.ok) pending.resolve(event.data.text ?? event.data.tokens ?? []);
       else pending.reject(new Error(event.data.error ?? "Kiwi 분석 실패"));
     };
     kiwiWorker.onerror = () => {
@@ -30,7 +32,7 @@ export function callKiwi(type: "init" | "tokenize", text = "") {
   }
 
   const id = ++kiwiSequence;
-  return new Promise<Token[]>((resolve, reject) => {
+  return new Promise<Token[] | string>((resolve, reject) => {
     kiwiPending.set(id, { resolve, reject });
     kiwiWorker!.postMessage({ id, type, text });
   });
