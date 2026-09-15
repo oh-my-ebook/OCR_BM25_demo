@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
 import { ChevronLeft, ChevronRight, Copy, FileCheck2, LoaderCircle, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -23,6 +23,7 @@ const DPI = 200;
 
 export default function PaddlePdfViewer() {
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
+  const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const paddleRef = useRef<PaddleOcr | null>(null);
   const imageUrlRef = useRef("");
   const [fileName, setFileName] = useState("");
@@ -38,8 +39,9 @@ export default function PaddlePdfViewer() {
     if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
     imageUrlRef.current = "";
     await paddleRef.current?.dispose();
-    await pdfRef.current?.destroy();
+    await loadingTaskRef.current?.destroy();
     paddleRef.current = null;
+    loadingTaskRef.current = null;
     pdfRef.current = null;
   }
 
@@ -134,13 +136,15 @@ export default function PaddlePdfViewer() {
       await dispose();
       const pdfjs = await import("pdfjs-dist");
       pdfjs.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.mjs";
-      const pdf = await pdfjs.getDocument({
+      const loadingTask = pdfjs.getDocument({
         data: await file.arrayBuffer(),
         cMapUrl: "/vendor/pdfjs/cmaps/",
         cMapPacked: true,
         standardFontDataUrl: "/vendor/pdfjs/standard_fonts/",
         wasmUrl: "/vendor/pdfjs/wasm/",
-      }).promise;
+      });
+      loadingTaskRef.current = loadingTask;
+      const pdf = await loadingTask.promise;
       pdfRef.current = pdf;
       setPageCount(pdf.numPages);
       setProgress(8);
