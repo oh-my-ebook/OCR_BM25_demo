@@ -10,6 +10,8 @@ import { fitOcrLines, type SelectableTextLine } from "@/lib/ocr-text-layer";
 import { getPaddleOrtWasmPaths } from "@/lib/paddle-ort";
 
 type PaddleOcr = Awaited<ReturnType<(typeof import("@paddleocr/paddleocr-js"))["PaddleOCR"]["create"]>>;
+type TesseractWorker = Awaited<ReturnType<(typeof import("tesseract.js"))["createWorker"]>>;
+type OcrEngine = "paddle" | "tesseract";
 type PageView = {
   page: number;
   width: number;
@@ -20,11 +22,17 @@ type PageView = {
 };
 
 const DPI = 200;
+const engineLabels: Record<OcrEngine, string> = {
+  paddle: "PaddleOCR",
+  tesseract: "Tesseract",
+};
 
-export default function PaddlePdfViewer() {
+export default function SelectablePdfViewer() {
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null);
   const paddleRef = useRef<PaddleOcr | null>(null);
+  const tesseractRef = useRef<TesseractWorker | null>(null);
+  const fileRef = useRef<File | null>(null);
   const imageUrlRef = useRef("");
   const [fileName, setFileName] = useState("");
   const [pageCount, setPageCount] = useState(0);
@@ -34,21 +42,26 @@ export default function PaddlePdfViewer() {
   const [status, setStatus] = useState("PDF를 선택하세요");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [engine, setEngine] = useState<OcrEngine>("paddle");
 
   async function dispose() {
     if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
     imageUrlRef.current = "";
     await paddleRef.current?.dispose();
+    await tesseractRef.current?.terminate();
     await loadingTaskRef.current?.destroy();
     paddleRef.current = null;
+    tesseractRef.current = null;
     loadingTaskRef.current = null;
     pdfRef.current = null;
   }
 
   useEffect(() => () => void dispose(), []);
 
-  async function renderPage(pageNumber: number, pdf = pdfRef.current, paddle = paddleRef.current) {
-    if (!pdf || !paddle) return;
+  async function renderPage(pageNumber: number, pdf = pdfRef.current, selectedEngine = engine) {
+    const paddle = paddleRef.current;
+    const tesseract = tesseractRef.current;
+    if (!pdf || (selectedEngine === "paddle" ? !paddle : !tesseract)) return;
     setBusy(true);
     setCopied(false);
     setError("");
@@ -70,29 +83,43 @@ export default function PaddlePdfViewer() {
       await page.render({ canvas, canvasContext: context, viewport, background: "#ffffff" }).promise;
 
       setProgress(35);
-      setStatus(`${pageNumber}/${pdf.numPages}쪽 PaddleOCR 인식 중`);
-      const [recognized] = await paddle.predict(canvas, {
-        textDetLimitSideLen: 1600,
-        textDetLimitType: "max",
-        textDetMaxSideLimit: 3000,
-        textDetBoxThresh: 0.45,
-        textRecScoreThresh: 0.25,
-      });
-      const items = recognized.items.filter((item) => item.text.trim());
+      setStatus(`${pageNumber}/${pdf.numPages}쪽 ${engineLabels[selectedEngine]} 인식 중`);
+      let ocrLines: Array<{ text: string; bbox: { x0: number; y0: number; x1: number; y1: number } }>;
+      if (selectedEngine === "paddle") {
+        const [recognized] = await paddle!.predict(canvas, {
+          textDetLimitSideLen: 1600,
+          textDetLimitType: "max",
+          textDetMaxSideLimit: 3000,
+          textDetBoxThresh: 0.45,
+          textRecScoreThresh: 0.25,
+        });
+        ocrLines = recognized.items.filter((item) => item.text.trim()).map((item) => ({
+          text: item.text.trim(),
+          bbox: {
+            x0: Math.min(...item.poly.map((point) => point[0])),
+            y0: Math.min(...item.poly.map((point) => point[1])),
+            x1: Math.max(...item.poly.map((point) => point[0])),
+            y1: Math.max(...item.poly.map((point) => point[1])),
+          },
+        }));
+      } else {
+        const recognized = await tesseract!.recognize(canvas, {}, { text: true, blocks: true });
+        ocrLines = (recognized.data.blocks ?? []).flatMap((block) =>
+          block.paragraphs.flatMap((paragraph) =>
+            paragraph.lines
+              .filter((line) => line.text.trim())
+              .map((line) => ({ text: line.text.trim(), bbox: line.bbox })),
+          ),
+        );
+      }
       setProgress(78);
       setStatus(`${pageNumber}/${pdf.numPages}쪽 Kiwi 후처리 중`);
-      const processedText = await callKiwi("postprocess", items.map((item) => item.text.trim()).join("\n"));
+      const processedText = await callKiwi("postprocess", ocrLines.map((line) => line.text).join("\n"));
       const processedLines = processedText.split("\n");
-      const ocrLines = items.map((item, index) => ({
-        text: processedLines[index] ?? item.text.trim(),
-        bbox: {
-          x0: Math.min(...item.poly.map((point) => point[0])),
-          y0: Math.min(...item.poly.map((point) => point[1])),
-          x1: Math.max(...item.poly.map((point) => point[0])),
-          y1: Math.max(...item.poly.map((point) => point[1])),
-        },
-      }));
-      const lines = fitOcrLines(ocrLines, (text, fontSize) => {
+      const lines = fitOcrLines(ocrLines.map((line, index) => ({
+        ...line,
+        text: processedLines[index] ?? line.text,
+      })), (text, fontSize) => {
         context.font = `${fontSize}px sans-serif`;
         return context.measureText(text).width;
       });
@@ -111,7 +138,7 @@ export default function PaddlePdfViewer() {
         lines,
       });
       setProgress(100);
-      setStatus(`${pageNumber}/${pdf.numPages}쪽 · ${lines.length.toLocaleString()}개 행 선택 영역`);
+      setStatus(`${pageNumber}/${pdf.numPages}쪽 · ${engineLabels[selectedEngine]} · ${lines.length.toLocaleString()}개 행 선택 영역`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setStatus(`${pageNumber}/${pdf.numPages}쪽 처리 실패`);
@@ -123,14 +150,15 @@ export default function PaddlePdfViewer() {
     }
   }
 
-  async function openPdf(file: File) {
+  async function openPdf(file: File, selectedEngine = engine) {
+    fileRef.current = file;
     setBusy(true);
     setError("");
     setView(null);
     setFileName(file.name);
     setPageCount(0);
     setProgress(2);
-    setStatus("PDF, PaddleOCR, Kiwi 준비 중");
+    setStatus(`PDF, ${engineLabels[selectedEngine]}, Kiwi 준비 중`);
 
     try {
       await dispose();
@@ -149,25 +177,43 @@ export default function PaddlePdfViewer() {
       setPageCount(pdf.numPages);
       setProgress(8);
 
-      const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
-      const wasmPaths = await getPaddleOrtWasmPaths();
-      const paddle = await PaddleOCR.create({
-        worker: false,
-        textDetectionModelName: "PP-OCRv5_mobile_det",
-        textDetectionModelAsset: { url: "/vendor/paddleocr/PP-OCRv5_mobile_det_onnx_infer.tar" },
-        textRecognitionModelName: "korean_PP-OCRv5_mobile_rec",
-        textRecognitionModelAsset: { url: "/vendor/paddleocr/korean_PP-OCRv5_mobile_rec_onnx_infer.tar" },
-        textRecognitionBatchSize: 8,
-        ortOptions: {
-          backend: "wasm",
-          wasmPaths,
-          numThreads: 1,
-          simd: true,
-        },
-      });
-      paddleRef.current = paddle;
+      if (selectedEngine === "paddle") {
+        const { PaddleOCR } = await import("@paddleocr/paddleocr-js");
+        const wasmPaths = await getPaddleOrtWasmPaths();
+        paddleRef.current = await PaddleOCR.create({
+          worker: false,
+          textDetectionModelName: "PP-OCRv5_mobile_det",
+          textDetectionModelAsset: { url: "/vendor/paddleocr/PP-OCRv5_mobile_det_onnx_infer.tar" },
+          textRecognitionModelName: "korean_PP-OCRv5_mobile_rec",
+          textRecognitionModelAsset: { url: "/vendor/paddleocr/korean_PP-OCRv5_mobile_rec_onnx_infer.tar" },
+          textRecognitionBatchSize: 8,
+          ortOptions: {
+            backend: "wasm",
+            wasmPaths,
+            numThreads: 1,
+            simd: true,
+          },
+        });
+      } else {
+        const tesseract = await import("tesseract.js");
+        tesseractRef.current = await tesseract.createWorker(
+          ["kor", "eng"],
+          tesseract.OEM.LSTM_ONLY,
+          {
+            workerPath: "/vendor/tesseract/worker.min.js",
+            corePath: "/vendor/tesseract",
+            langPath: "/vendor/tessdata",
+            gzip: true,
+          },
+        );
+        await tesseractRef.current.setParameters({
+          tessedit_pageseg_mode: tesseract.PSM.AUTO,
+          preserve_interword_spaces: "1",
+          user_defined_dpi: String(DPI),
+        });
+      }
       await callKiwi("init");
-      await renderPage(1, pdf, paddle);
+      await renderPage(1, pdf, selectedEngine);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setStatus("처리 실패");
@@ -190,12 +236,30 @@ export default function PaddlePdfViewer() {
       <section className="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
         <aside className="h-fit rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[var(--shadow)]">
           <p className="eyebrow">SELECTABLE PDF</p>
-          <h2 className="mt-2 text-xl font-bold tracking-tight">PaddleOCR + Kiwi 텍스트 레이어</h2>
+          <h2 className="mt-2 text-xl font-bold tracking-tight">{engineLabels[engine]} + Kiwi 텍스트 레이어</h2>
           <p className="mt-2 text-sm leading-6 text-[var(--muted-text)]">
-            PDF는 200 DPI로 로컬 처리됩니다. PaddleOCR 결과를 Kiwi로 후처리한 뒤 옅은 파란 영역을 드래그해 복사할 수 있습니다.
+            PDF는 200 DPI로 로컬 처리됩니다. 선택한 OCR 결과를 Kiwi로 후처리한 뒤 옅은 파란 영역을 드래그해 복사할 수 있습니다.
           </p>
 
-          <label className="mt-5 flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--accent-soft)] px-5 text-center">
+          <label className="mt-5 block text-xs font-bold text-[var(--muted-text)]">
+            OCR 모델
+            <select
+              className="mt-1.5 w-full rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-sm font-medium text-[var(--foreground)]"
+              value={engine}
+              disabled={busy}
+              onChange={(event) => {
+                const selectedEngine = event.target.value as OcrEngine;
+                setEngine(selectedEngine);
+                if (fileRef.current) void openPdf(fileRef.current, selectedEngine);
+              }}
+            >
+              <option value="paddle">PaddleOCR · PP-OCRv5 한국어</option>
+              <option value="tesseract">Tesseract · kor + eng LSTM</option>
+            </select>
+            <span className="mt-1.5 block font-normal leading-5">모델을 바꾸면 현재 PDF를 같은 조건으로 다시 처리합니다.</span>
+          </label>
+
+          <label className="mt-3 flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-[var(--accent)] bg-[var(--accent-soft)] px-5 text-center">
             {busy ? <LoaderCircle className="size-7 animate-spin text-[var(--accent-strong)]" /> : <Upload className="size-7 text-[var(--accent-strong)]" />}
             <span className="mt-3 text-sm font-bold">PDF 선택</span>
             <span className="mt-1 max-w-64 truncate text-xs text-[var(--muted-text)]">{fileName || "파일은 외부로 전송되지 않습니다"}</span>

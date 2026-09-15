@@ -30,7 +30,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import OcrComparison from "./ocr-comparison";
-import PaddlePdfViewer from "./paddle-pdf-viewer";
+import SelectablePdfViewer from "./selectable-pdf-viewer";
 import WebLLMChat from "./webllm-chat";
 import {
   chunkText,
@@ -965,7 +965,7 @@ export default function Home() {
           <OcrComparison />
         </TabsContent>
         <TabsContent value="selectable-pdf" className="mt-0">
-          <PaddlePdfViewer />
+          <SelectablePdfViewer />
         </TabsContent>
         <TabsContent value="webllm-chat" className="mt-0">
           <WebLLMChat />
