@@ -10,6 +10,7 @@ import {
   FileSearch,
   FileText,
   Gauge,
+  HardDrive,
   Languages,
   LoaderCircle,
   LockKeyhole,
@@ -30,6 +31,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import OcrComparison from "./ocr-comparison";
+import OpfsStorageLab from "./opfs-storage-lab";
 import SelectablePdfViewer from "./selectable-pdf-viewer";
 import WebLLMChat from "./webllm-chat";
 import {
@@ -530,6 +532,7 @@ export default function Home() {
               <TabsTrigger value="search-lab">BM25 검색 실험</TabsTrigger>
               <TabsTrigger value="ocr-comparison">OCR 엔진 비교</TabsTrigger>
               <TabsTrigger value="selectable-pdf"><MousePointer2 /> 텍스트 선택 PDF</TabsTrigger>
+              <TabsTrigger value="opfs-storage"><HardDrive /> OPFS 저장소</TabsTrigger>
               <TabsTrigger value="webllm-chat"><Sparkles /> WebLLM 채팅</TabsTrigger>
             </TabsList>
           </div>
@@ -966,6 +969,9 @@ export default function Home() {
         </TabsContent>
         <TabsContent value="selectable-pdf" className="mt-0">
           <SelectablePdfViewer />
+        </TabsContent>
+        <TabsContent value="opfs-storage" className="mt-0">
+          <OpfsStorageLab />
         </TabsContent>
         <TabsContent value="webllm-chat" className="mt-0">
           <WebLLMChat />

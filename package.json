@@ -18,6 +18,7 @@
     "check:ocr-ensemble": "node --experimental-strip-types scripts/check-ocr-ensemble.ts",
     "check:ocr-layer": "node --experimental-strip-types scripts/check-ocr-text-layer.ts",
     "check:kiwi-postprocess": "node --experimental-strip-types scripts/check-kiwi-postprocess.ts",
+    "check:opfs-sqlite": "node --experimental-strip-types scripts/check-opfs-sqlite.ts",
     "check:paddle-ort": "node --experimental-strip-types scripts/check-paddle-ort.ts"
   },
   "dependencies": {
